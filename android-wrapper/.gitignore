@@ -1,0 +1,13 @@
+.gradle/
+/app/build/
+/build-artifact/
+__pycache__/
+*.py[cod]
+/app/src/main/python/ai/
+/app/src/main/python/core/
+/app/src/main/python/memory/
+/app/src/main/python/security/
+/app/src/main/python/tools/
+*.apk
+*.aab
+local.properties

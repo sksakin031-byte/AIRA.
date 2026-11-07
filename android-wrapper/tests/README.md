@@ -1,0 +1,1 @@
+The GitHub Actions workflow runs these tests after staging the unchanged Python modules from `AIRA-SOURCE-FINAL.zip`. They verify bridge initialization, app-private API-key storage/removal, status output, and that the wrapper blocks terminal multi-line writes.

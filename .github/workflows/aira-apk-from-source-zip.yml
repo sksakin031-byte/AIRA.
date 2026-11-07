@@ -1,0 +1,121 @@
+name: Build AIRA APK from source ZIP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "AIRA-SOURCE-FINAL.zip"
+      - "android-wrapper/**"
+      - ".github/workflows/aira-apk-from-source-zip.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aira-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test Python source and build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out AIRA repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: "platforms;android-36 build-tools;36.0.0"
+
+      - name: Verify unchanged ZIP, run upstream tests, and stage Python modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="AIRA-SOURCE-FINAL.zip"
+          expected_blob="e81622fa7841a8acfe4102447ab69adabd6e6e0c"
+          actual_blob="$(git rev-parse "HEAD:${archive}")"
+          test "$actual_blob" = "$expected_blob"
+          before_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          echo "ZIP Git blob: $actual_blob"
+          echo "ZIP SHA-256 before build: $before_sha256"
+          python - "$archive" "$RUNNER_TEMP/aira-source" <<'PY'
+          import sys
+          from pathlib import PurePosixPath
+          from zipfile import ZipFile
+
+          archive, destination = sys.argv[1:]
+          with ZipFile(archive) as zf:
+              for entry in zf.infolist():
+                  name = entry.filename
+                  path = PurePosixPath(name)
+                  if path.is_absolute() or ".." in path.parts or "\\" in name:
+                      raise SystemExit(f"Unsafe ZIP path rejected: {name!r}")
+                  if not name.startswith("aira-agent/"):
+                      raise SystemExit(f"Unexpected top-level ZIP path: {name!r}")
+              if zf.testzip() is not None:
+                  raise SystemExit("Source ZIP CRC validation failed")
+              zf.extractall(destination)
+          PY
+          source="$RUNNER_TEMP/aira-source/aira-agent"
+          test -f "$source/core/main.py"
+          test -f "$source/security/secrets.py"
+          (cd "$source" && bash ./test.sh)
+          python_dir="android-wrapper/app/src/main/python"
+          mkdir -p "$python_dir"
+          for module in ai core memory security tools; do
+            test -d "$source/$module"
+            cp -a "$source/$module" "$python_dir/"
+          done
+          after_stage_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          test "$before_sha256" = "$after_stage_sha256"
+          echo "ZIP SHA-256 after staging: $after_stage_sha256"
+
+      - name: Test Android wrapper bridge
+        env:
+          PYTHONPATH: ${{ github.workspace }}/android-wrapper/app/src/main/python
+        run: python -m unittest discover -s android-wrapper/tests -v
+
+      - name: Build debug APK
+        working-directory: android-wrapper
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Verify APK and confirm source ZIP is unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="android-wrapper/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$apk"
+          before_blob="$(git rev-parse "HEAD:AIRA-SOURCE-FINAL.zip")"
+          after_sha256="$(sha256sum AIRA-SOURCE-FINAL.zip | awk '{print $1}')"
+          test "$before_blob" = "e81622fa7841a8acfe4102447ab69adabd6e6e0c"
+          test "$after_sha256" = "$(git show HEAD:AIRA-SOURCE-FINAL.zip | sha256sum | awk '{print $1}')"
+          mkdir -p android-wrapper/build-artifact
+          cp "$apk" android-wrapper/build-artifact/AIRA-Android-debug.apk
+          sha256sum android-wrapper/build-artifact/AIRA-Android-debug.apk > android-wrapper/build-artifact/SHA256SUMS
+          echo "Source ZIP Git blob after build: $before_blob"
+          echo "APK SHA-256: $(awk '{print $1}' android-wrapper/build-artifact/SHA256SUMS)"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: AIRA-Android-debug-${{ github.run_number }}
+          path: |
+            android-wrapper/build-artifact/AIRA-Android-debug.apk
+            android-wrapper/build-artifact/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
